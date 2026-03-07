@@ -52,7 +52,71 @@ class LibraryManager:
                 logger.info(f"Loading project fp-lib-table from: {project_table}")
                 self._parse_fp_lib_table(project_table)
 
+        discovered = self._discover_libraries_from_filesystem()
+        for nickname, path in discovered.items():
+            if nickname not in self.libraries:
+                self.libraries[nickname] = path
+
         logger.info(f"Loaded {len(self.libraries)} footprint libraries")
+
+    def _discover_libraries_from_filesystem(self) -> Dict[str, str]:
+        """Discover .pretty libraries directly from known KiCad directories."""
+        discovered: Dict[str, str] = {}
+        roots = self._get_fallback_search_roots()
+
+        for root in roots:
+            for library_path in sorted(root.rglob("*.pretty")):
+                if not library_path.is_dir():
+                    continue
+
+                nickname = library_path.stem
+                discovered.setdefault(nickname, str(library_path))
+
+        if discovered:
+            logger.info(
+                f"Discovered {len(discovered)} footprint libraries from filesystem fallback"
+            )
+
+        return discovered
+
+    def _get_fallback_search_roots(self) -> List[Path]:
+        """Return existing directories worth scanning when fp-lib-table is absent."""
+        candidates: List[Path] = []
+
+        footprint_dir = self._find_kicad_footprint_dir()
+        if footprint_dir:
+            candidates.append(Path(footprint_dir))
+
+        third_party_dir = self._find_kicad_3rdparty_dir()
+        if third_party_dir:
+            third_party_root = Path(third_party_dir)
+            candidates.extend(
+                [
+                    third_party_root,
+                    third_party_root / "footprints",
+                    third_party_root / "libraries",
+                ]
+            )
+
+        if self.project_path:
+            candidates.extend(
+                [
+                    self.project_path / "footprints",
+                    self.project_path / "libraries",
+                ]
+            )
+
+        unique_roots: List[Path] = []
+        seen = set()
+        for candidate in candidates:
+            resolved = candidate.expanduser()
+            key = str(resolved)
+            if key in seen or not resolved.exists() or not resolved.is_dir():
+                continue
+            seen.add(key)
+            unique_roots.append(resolved)
+
+        return unique_roots
 
     def _get_global_fp_lib_table(self) -> Optional[Path]:
         """Get path to global fp-lib-table file"""

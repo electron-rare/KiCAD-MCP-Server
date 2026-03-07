@@ -7,7 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import express from "express";
 import { spawn, exec, execSync, ChildProcess } from "child_process";
 import { existsSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, delimiter } from "path";
 import { logger } from "./logger.js";
 
 // Import tool registration functions
@@ -169,6 +169,37 @@ function findPythonExecutable(scriptPath: string): string {
   return isWindows ? "python.exe" : "python3";
 }
 
+function getKiCadPythonPathEntries(): string[] {
+  const entries = new Set<string>();
+
+  if (process.env.KICAD_PYTHONPATH) {
+    for (const value of process.env.KICAD_PYTHONPATH.split(delimiter)) {
+      if (value && existsSync(value)) {
+        entries.add(value);
+      }
+    }
+  }
+
+  if (process.platform === "linux") {
+    const candidates = [
+      "/usr/lib/kicad/lib/python3/dist-packages",
+      "/usr/local/lib/kicad/lib/python3/dist-packages",
+      "/usr/lib/python3/dist-packages",
+      "/usr/local/lib/python3/dist-packages",
+      "/usr/lib/python3.12/dist-packages",
+      "/usr/local/lib/python3.12/dist-packages",
+    ];
+
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        entries.add(candidate);
+      }
+    }
+  }
+
+  return Array.from(entries);
+}
+
 /**
  * KiCAD MCP Server class
  */
@@ -189,6 +220,18 @@ export class KiCADMcpServer {
     reject: Function;
     timeoutHandle: NodeJS.Timeout;
   } | null = null;
+
+  private buildPythonEnv(): NodeJS.ProcessEnv {
+    const env = { ...process.env };
+    const existing = env.PYTHONPATH ? env.PYTHONPATH.split(delimiter) : [];
+    const merged = [...getKiCadPythonPathEntries(), ...existing].filter(Boolean);
+
+    if (merged.length > 0) {
+      env.PYTHONPATH = Array.from(new Set(merged)).join(delimiter);
+    }
+
+    return env;
+  }
 
   /**
    * Constructor for the KiCAD MCP Server
@@ -305,6 +348,7 @@ export class KiCADMcpServer {
     } else {
       // Command name: verify it's executable via --version test
       logger.info(`Validating command-based Python executable: ${pythonExe}`);
+      const pythonEnv = this.buildPythonEnv();
       try {
         const { stdout } = await new Promise<{
           stdout: string;
@@ -314,7 +358,7 @@ export class KiCADMcpServer {
             `"${pythonExe}" --version`,
             {
               timeout: 3000,
-              env: { ...process.env },
+              env: pythonEnv,
             },
             (error: any, stdout: string, stderr: string) => {
               if (error) {
@@ -369,6 +413,7 @@ export class KiCADMcpServer {
 
       const testCommand = `"${pythonExe}" -c "import pcbnew; print('OK')"`;
 
+      const pythonEnv = this.buildPythonEnv();
       try {
         const { stdout, stderr } = await new Promise<{
           stdout: string;
@@ -378,7 +423,7 @@ export class KiCADMcpServer {
             testCommand,
             {
               timeout: 5000,
-              env: { ...process.env },
+              env: pythonEnv,
             },
             (error: any, stdout: string, stderr: string) => {
               if (error) {
@@ -470,12 +515,7 @@ export class KiCADMcpServer {
       }
       this.pythonProcess = spawn(pythonExe, [this.kicadScriptPath], {
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PYTHONPATH:
-            process.env.PYTHONPATH ||
-            "C:/Program Files/KiCad/9.0/lib/python3/dist-packages",
-        },
+        env: this.buildPythonEnv(),
       });
 
       // Listen for process exit
