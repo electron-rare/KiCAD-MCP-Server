@@ -12,7 +12,16 @@ import json
 import traceback
 import logging
 import os
+import base64
+import io
+import re
+import subprocess
+import tempfile
+from dataclasses import asdict
+from pathlib import Path
 from typing import Dict, Any, Optional
+
+from PIL import Image, ImageDraw
 
 # Import tool schemas and resource definitions
 from schemas.tool_schemas import TOOL_SCHEMAS
@@ -23,11 +32,33 @@ log_dir = os.path.join(os.path.expanduser("~"), ".kicad-mcp", "logs")
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, "kicad_interface.log")
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stderr)],
+def _resolve_log_level(env_name: str, default: str) -> int:
+    value = os.environ.get(env_name, default).upper()
+    return getattr(logging, value, getattr(logging, default.upper(), logging.INFO))
+
+
+root_logger = logging.getLogger()
+root_logger.handlers.clear()
+root_logger.setLevel(logging.DEBUG)
+
+formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+file_handler = logging.FileHandler(log_file)
+file_handler.setLevel(_resolve_log_level("KICAD_PYTHON_FILE_LOG_LEVEL", "INFO"))
+file_handler.setFormatter(formatter)
+
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(
+    _resolve_log_level(
+        "KICAD_PYTHON_STDERR_LOG_LEVEL",
+        os.environ.get("KICAD_PYTHON_LOG_LEVEL", "WARNING"),
+    )
 )
+stderr_handler.setFormatter(formatter)
+
+root_logger.addHandler(file_handler)
+root_logger.addHandler(stderr_handler)
+
 logger = logging.getLogger("kicad_interface")
 
 # Log Python environment details
@@ -106,7 +137,7 @@ if AUTO_LAUNCH_KICAD:
 # Check which backend to use
 # KICAD_BACKEND can be: 'auto', 'ipc', or 'swig'
 KICAD_BACKEND = os.environ.get("KICAD_BACKEND", "auto").lower()
-logger.info(f"KiCAD backend preference: {KICAD_BACKEND}")
+logger.debug(f"KiCAD backend preference: {KICAD_BACKEND}")
 
 # Try to use IPC backend first if available and preferred
 USE_IPC_BACKEND = False
@@ -129,7 +160,7 @@ if KICAD_BACKEND in ("auto", "ipc"):
     except ImportError:
         logger.info("IPC backend not available (kicad-python not installed)")
     except Exception as e:
-        logger.info(f"IPC backend connection failed: {e}")
+        logger.debug(f"IPC backend connection failed: {e}")
         ipc_backend = None
 
 # Fall back to SWIG backend if IPC not available
@@ -141,7 +172,7 @@ if not USE_IPC_BACKEND and KICAD_BACKEND != "ipc":
 
         logger.info(f"Successfully imported pcbnew module from: {pcbnew.__file__}")
         logger.info(f"pcbnew version: {pcbnew.GetBuildVersion()}")
-        logger.warning("Using SWIG backend - changes require manual reload in KiCAD UI")
+        logger.info("Using SWIG backend - changes require manual reload in KiCAD UI")
     except ImportError as e:
         logger.error(f"Failed to import pcbnew module: {e}")
         logger.error(f"Current sys.path: {sys.path}")
@@ -295,6 +326,9 @@ class KiCADInterface:
             "open_project": self.project_commands.open_project,
             "save_project": self.project_commands.save_project,
             "get_project_info": self.project_commands.get_project_info,
+            "get_project_properties": self._handle_get_project_properties,
+            "get_project_files": self._handle_get_project_files,
+            "get_project_status": self._handle_get_project_status,
             # Board commands
             "set_board_size": self.board_commands.set_board_size,
             "add_layer": self.board_commands.add_layer,
@@ -302,6 +336,7 @@ class KiCADInterface:
             "get_board_info": self.board_commands.get_board_info,
             "get_layer_list": self.board_commands.get_layer_list,
             "get_board_2d_view": self.board_commands.get_board_2d_view,
+            "get_board_3d_view": self._handle_get_board_3d_view,
             "get_board_extents": self.board_commands.get_board_extents,
             "add_board_outline": self.board_commands.add_board_outline,
             "add_mounting_hole": self.board_commands.add_mounting_hole,
@@ -314,9 +349,16 @@ class KiCADInterface:
             "rotate_component": self.component_commands.rotate_component,
             "delete_component": self.component_commands.delete_component,
             "edit_component": self.component_commands.edit_component,
+            "add_component_annotation": self.component_commands.add_component_annotation,
             "get_component_properties": self.component_commands.get_component_properties,
             "get_component_list": self.component_commands.get_component_list,
+            "get_component_connections": self.component_commands.get_component_connections,
+            "get_component_placement": self.component_commands.get_component_placement,
+            "get_component_groups": self.component_commands.get_component_groups,
+            "get_component_visualization": self.component_commands.get_component_visualization,
             "find_component": self.component_commands.find_component,
+            "group_components": self.component_commands.group_components,
+            "replace_component": self.component_commands.replace_component,
             "get_component_pads": self.component_commands.get_component_pads,
             "get_pad_position": self.component_commands.get_pad_position,
             "place_component_array": self.component_commands.place_component_array,
@@ -333,12 +375,17 @@ class KiCADInterface:
             "get_nets_list": self.routing_commands.get_nets_list,
             "create_netclass": self.routing_commands.create_netclass,
             "add_copper_pour": self.routing_commands.add_copper_pour,
+            "add_zone": self.routing_commands.add_copper_pour,
             "route_differential_pair": self.routing_commands.route_differential_pair,
             "refill_zones": self._handle_refill_zones,
             # Design rule commands
             "set_design_rules": self.design_rule_commands.set_design_rules,
             "get_design_rules": self.design_rule_commands.get_design_rules,
             "run_drc": self.design_rule_commands.run_drc,
+            "add_net_class": self._handle_add_net_class,
+            "assign_net_to_class": self.design_rule_commands.assign_net_to_class,
+            "set_layer_constraints": self.design_rule_commands.set_layer_constraints,
+            "check_clearance": self.design_rule_commands.check_clearance,
             "get_drc_violations": self.design_rule_commands.get_drc_violations,
             # Export commands
             "export_gerber": self.export_commands.export_gerber,
@@ -346,11 +393,20 @@ class KiCADInterface:
             "export_svg": self.export_commands.export_svg,
             "export_3d": self.export_commands.export_3d,
             "export_bom": self.export_commands.export_bom,
+            "export_netlist": self.export_commands.export_netlist,
+            "export_position_file": self.export_commands.export_position_file,
+            "export_vrml": self.export_commands.export_vrml,
             # Library commands (footprint management)
             "list_libraries": self.library_commands.list_libraries,
             "search_footprints": self.library_commands.search_footprints,
             "list_library_footprints": self.library_commands.list_library_footprints,
             "get_footprint_info": self.library_commands.get_footprint_info,
+            "get_component_library": self._handle_get_component_library,
+            "get_library_list": self._handle_get_library_list,
+            "get_component_details": self._handle_get_component_details,
+            "get_component_footprint": self._handle_get_component_footprint,
+            "get_component_symbol": self._handle_get_component_symbol,
+            "get_component_3d_model": self._handle_get_component_3d_model,
             # Symbol library commands (local KiCad symbol library search)
             "list_symbol_libraries": self.symbol_library_commands.list_symbol_libraries,
             "search_symbols": self.symbol_library_commands.search_symbols,
@@ -371,6 +427,7 @@ class KiCADInterface:
             "add_schematic_component": self._handle_add_schematic_component,
             "delete_schematic_component": self._handle_delete_schematic_component,
             "edit_schematic_component": self._handle_edit_schematic_component,
+            "add_wire": self._handle_add_wire,
             "add_schematic_wire": self._handle_add_schematic_wire,
             "add_schematic_connection": self._handle_add_schematic_connection,
             "add_schematic_net_label": self._handle_add_schematic_net_label,
@@ -485,10 +542,22 @@ class KiCADInterface:
 
                 # Update board reference if command was successful
                 if result.get("success", False):
-                    if command == "create_project" or command == "open_project":
+                    if (
+                        command == "create_project"
+                        or command == "open_project"
+                        or command == "save_project"
+                    ):
                         logger.info("Updating board reference...")
                         # Get board from the project commands handler
                         self.board = self.project_commands.board
+                        project_info = result.get("project", {})
+                        self._set_project_context_from_paths(
+                            project_info.get("boardPath")
+                            or project_info.get("path")
+                            or self.board.GetFileName()
+                            if self.board
+                            else None
+                        )
                         self._update_command_handlers()
 
                 return result
@@ -519,6 +588,923 @@ class KiCADInterface:
         self.routing_commands.board = self.board
         self.design_rule_commands.board = self.board
         self.export_commands.board = self.board
+
+    def _set_project_context_from_paths(self, path_value):
+        """Refresh project-local library managers from a project or board path."""
+        if not path_value:
+            return
+
+        candidate = Path(os.path.abspath(os.path.expanduser(str(path_value))))
+        if candidate.suffix in {".kicad_pcb", ".kicad_pro", ".kicad_sch"}:
+            project_path = candidate.parent
+        else:
+            project_path = candidate if candidate.is_dir() else candidate.parent
+
+        if project_path == getattr(self, "_current_project_path", None):
+            return
+
+        self._current_project_path = project_path
+        self.footprint_library = FootprintLibraryManager(project_path=project_path)
+        self.component_commands.library_manager = self.footprint_library
+        self.library_commands.library_manager = self.footprint_library
+        self.symbol_library_commands.library_manager = SymbolLibraryManager(
+            project_path=project_path
+        )
+        logger.info(f"Updated project-local library context: {project_path}")
+
+    def _get_project_root(self) -> Optional[Path]:
+        """Resolve the current project directory from tracked state."""
+        if getattr(self, "_current_project_path", None):
+            return self._current_project_path
+
+        if self.board and self.board.GetFileName():
+            board_path = Path(self.board.GetFileName())
+            if board_path.parent:
+                return board_path.parent
+
+        return None
+
+    def _get_board_file_path(self) -> Optional[Path]:
+        """Return the current board file path if one is available."""
+        if not self.board:
+            return None
+
+        filename = self.board.GetFileName()
+        if not filename:
+            return None
+
+        return Path(filename)
+
+    def _get_project_basename(self) -> Optional[str]:
+        """Return the inferred KiCad project basename."""
+        board_path = self._get_board_file_path()
+        if board_path:
+            return board_path.stem
+
+        project_root = self._get_project_root()
+        if project_root:
+            return project_root.name
+
+        return None
+
+    def _get_symbol_manager(self):
+        return self.symbol_library_commands.library_manager
+
+    def _get_footprint_manager(self):
+        return self.library_commands.library_manager
+
+    def _resolve_symbol_info(
+        self, component_id: Optional[str], library: Optional[str] = None
+    ):
+        """Resolve a symbol from explicit library/id hints."""
+        if not component_id:
+            return None
+
+        symbol_manager = self._get_symbol_manager()
+        symbol_name = component_id
+
+        if ":" in component_id and not library:
+            return symbol_manager.find_symbol(component_id)
+
+        if ":" in component_id:
+            _, symbol_name = component_id.split(":", 1)
+
+        if library:
+            return symbol_manager.get_symbol_info(library, symbol_name)
+
+        symbol = symbol_manager.find_symbol(symbol_name)
+        if symbol:
+            return symbol
+
+        matches = symbol_manager.search_symbols(symbol_name, limit=1)
+        return matches[0] if matches else None
+
+    def _load_footprint_object(self, footprint_spec: Optional[str]):
+        """Load a footprint object from a library spec."""
+        if not footprint_spec:
+            return None
+
+        footprint_manager = self._get_footprint_manager()
+        located = footprint_manager.find_footprint(footprint_spec)
+        if not located:
+            return None
+
+        library_path, footprint_name = located
+        footprint = pcbnew.FootprintLoad(library_path, footprint_name)
+        if not footprint:
+            return None
+
+        library_name = None
+        for nickname, path in footprint_manager.libraries.items():
+            if path == library_path:
+                library_name = nickname
+                break
+
+        return {
+            "footprint": footprint,
+            "library_path": library_path,
+            "library_name": library_name,
+            "footprint_name": footprint_name,
+            "full_name": (
+                f"{library_name}:{footprint_name}"
+                if library_name
+                else footprint_name
+            ),
+        }
+
+    def _resolve_model_path(self, raw_path: str, library_path: Optional[str] = None) -> str:
+        """Best-effort resolution of KiCad 3D model paths with env vars."""
+        if not raw_path:
+            return ""
+
+        expanded = os.path.expandvars(raw_path)
+        if os.path.isabs(expanded):
+            return expanded
+
+        if library_path:
+            candidate = os.path.join(library_path, expanded)
+            if os.path.exists(candidate):
+                return candidate
+
+        project_root = self._get_project_root()
+        if project_root:
+            candidate = str(project_root / expanded)
+            if os.path.exists(candidate):
+                return candidate
+
+        return expanded
+
+    def _get_current_schematic_path(self) -> Optional[Path]:
+        """Infer the current schematic path from the loaded project context."""
+        board_path = self._get_board_file_path()
+        if board_path:
+            candidate = board_path.with_suffix(".kicad_sch")
+            if candidate.exists():
+                return candidate
+
+        project_root = self._get_project_root()
+        if project_root:
+            for candidate in sorted(project_root.glob("*.kicad_sch")):
+                return candidate
+
+        return None
+
+    def _handle_add_net_class(self, params):
+        """Bridge legacy TypeScript field names to the routing netclass command."""
+        bridged = dict(params)
+        rename_map = {
+            "uvia_diameter": "uviaDiameter",
+            "uvia_drill": "uviaDrill",
+            "diff_pair_width": "diffPairWidth",
+            "diff_pair_gap": "diffPairGap",
+        }
+        for source, target in rename_map.items():
+            if source in bridged and target not in bridged:
+                bridged[target] = bridged.pop(source)
+        return self.routing_commands.create_netclass(bridged)
+
+    def _handle_add_wire(self, params):
+        """Bridge the generic add_wire tool to the schematic wire backend."""
+        start = params.get("startPoint") or params.get("start")
+        end = params.get("endPoint") or params.get("end")
+        schematic_path = params.get("schematicPath")
+        if not schematic_path:
+            resolved = self._get_current_schematic_path()
+            schematic_path = str(resolved) if resolved else None
+
+        def _normalize_point(point):
+            if isinstance(point, dict):
+                return [point.get("x", 0), point.get("y", 0)]
+            return point
+
+        return self._handle_add_schematic_wire(
+            {
+                "schematicPath": schematic_path,
+                "startPoint": _normalize_point(start),
+                "endPoint": _normalize_point(end),
+                "properties": params.get("properties", {}),
+            }
+        )
+
+    def _handle_get_project_properties(self, params):
+        """Return normalized project properties for the current board."""
+        project_result = self.project_commands.get_project_info({})
+        if not project_result.get("success"):
+            return project_result
+
+        project = project_result.get("project", {})
+        properties = {
+            "title": project.get("title", ""),
+            "date": project.get("date", ""),
+            "revision": project.get("revision", ""),
+            "company": project.get("company", ""),
+            "comments": [
+                project.get("comment1", ""),
+                project.get("comment2", ""),
+                project.get("comment3", ""),
+                project.get("comment4", ""),
+            ],
+        }
+
+        return {"success": True, "project": project, "properties": properties}
+
+    def _handle_get_project_files(self, params):
+        """List the primary files associated with the current project."""
+        project_root = self._get_project_root()
+        if not project_root:
+            return {
+                "success": False,
+                "message": "No project is loaded",
+                "errorDetails": "Load or create a project first",
+            }
+
+        project_name = self._get_project_basename() or project_root.name
+        candidates = [
+            project_root / f"{project_name}.kicad_pro",
+            project_root / f"{project_name}.kicad_pcb",
+            project_root / f"{project_name}.kicad_sch",
+            project_root / f"{project_name}.kicad_prl",
+            project_root / "fp-lib-table",
+            project_root / "sym-lib-table",
+        ]
+
+        files = []
+        seen_paths = set()
+        for candidate in candidates:
+            candidate_str = str(candidate)
+            if candidate_str in seen_paths or not candidate.exists():
+                continue
+            seen_paths.add(candidate_str)
+            stat = candidate.stat()
+            files.append(
+                {
+                    "name": candidate.name,
+                    "path": candidate_str,
+                    "type": candidate.suffix or candidate.name,
+                    "sizeBytes": stat.st_size,
+                    "modifiedAt": stat.st_mtime,
+                }
+            )
+
+        return {
+            "success": True,
+            "projectRoot": str(project_root),
+            "projectName": project_name,
+            "files": files,
+            "count": len(files),
+        }
+
+    def _handle_get_project_status(self, params):
+        """Return a concise status snapshot for the current project."""
+        project_root = self._get_project_root()
+        board_path = self._get_board_file_path()
+        project_files = self._handle_get_project_files({})
+        components = self.component_commands.get_component_list({})
+        nets = self.routing_commands.get_nets_list({})
+
+        project_file_types = {
+            Path(entry["path"]).suffix or Path(entry["path"]).name
+            for entry in project_files.get("files", [])
+        }
+
+        return {
+            "success": True,
+            "status": {
+                "boardLoaded": self.board is not None,
+                "projectRoot": str(project_root) if project_root else None,
+                "boardPath": str(board_path) if board_path else None,
+                "hasProjectFile": ".kicad_pro" in project_file_types,
+                "hasBoardFile": ".kicad_pcb" in project_file_types,
+                "hasSchematicFile": ".kicad_sch" in project_file_types,
+                "componentCount": len(components.get("components", []))
+                if components.get("success")
+                else 0,
+                "netCount": len(nets.get("nets", []))
+                if nets.get("success")
+                else 0,
+                "libraryTables": sorted(
+                    entry["name"]
+                    for entry in project_files.get("files", [])
+                    if entry["name"] in {"fp-lib-table", "sym-lib-table"}
+                ),
+            },
+        }
+
+    def _handle_get_board_3d_view(self, params):
+        """Render a board 3D preview using kicad-cli."""
+        board_path = self._get_board_file_path()
+        if not self.board or not board_path or not board_path.exists():
+            return {
+                "success": False,
+                "message": "No saved board is loaded",
+                "errorDetails": "Load or create a project and save the board first",
+            }
+
+        kicad_cli = self.export_commands._find_kicad_cli()
+        if not kicad_cli:
+            return {
+                "success": False,
+                "message": "kicad-cli not found",
+                "errorDetails": "KiCad CLI is required to render board previews",
+            }
+
+        angle = str(params.get("angle", "isometric")).lower()
+        width = int(params.get("width", 1600))
+        height = int(params.get("height", 900))
+        image_format = str(params.get("format", "png")).lower()
+        image_format = "jpg" if image_format == "jpeg" else image_format
+        suffix = ".jpg" if image_format == "jpg" else ".png"
+
+        render_args = []
+        if angle == "isometric":
+            render_args.extend(["--side", "top", "--rotate", "-45,0,45"])
+        elif angle in {"top", "bottom", "left", "right", "front", "back"}:
+            render_args.extend(["--side", angle])
+        else:
+            return {
+                "success": False,
+                "message": "Unsupported angle",
+                "errorDetails": f"Unsupported 3D render angle: {angle}",
+            }
+
+        data_dir = os.environ.get("KICAD_MCP_DATA_DIR")
+        temp_dir = data_dir if data_dir and os.path.isdir(data_dir) else None
+        with tempfile.NamedTemporaryFile(
+            suffix=suffix,
+            delete=False,
+            dir=temp_dir,
+        ) as tmp_file:
+            output_path = tmp_file.name
+
+        cmd = [
+            kicad_cli,
+            "pcb",
+            "render",
+            "--output",
+            output_path,
+            "--width",
+            str(width),
+            "--height",
+            str(height),
+            "--quality",
+            "basic",
+            "--background",
+            "transparent" if image_format == "png" else "opaque",
+            *render_args,
+            str(board_path),
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if result.returncode != 0 or not os.path.exists(output_path):
+                return {
+                    "success": False,
+                    "message": "3D render failed",
+                    "errorDetails": result.stderr or "render output was not created",
+                }
+
+            with open(output_path, "rb") as image_file:
+                encoded = base64.b64encode(image_file.read()).decode("ascii")
+
+            return {
+                "success": True,
+                "imageData": encoded,
+                "format": image_format,
+                "angle": angle,
+                "size": {"width": width, "height": height},
+            }
+        finally:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
+
+    def _handle_get_component_connections(self, params):
+        """Return the net connections for a placed component."""
+        reference = params.get("reference")
+        pads_result = self.component_commands.get_component_pads({"reference": reference})
+        if not pads_result.get("success"):
+            return pads_result
+
+        connections = []
+        for pad in pads_result.get("pads", []):
+            if pad.get("net"):
+                connections.append(
+                    {
+                        "pad": pad.get("number") or pad.get("name"),
+                        "net": pad.get("net"),
+                        "position": pad.get("position"),
+                    }
+                )
+
+        return {
+            "success": True,
+            "reference": reference,
+            "connections": connections,
+            "count": len(connections),
+        }
+
+    def _handle_get_component_placement(self, params):
+        """Return placement information for all placed components."""
+        components_result = self.component_commands.get_component_list({})
+        if not components_result.get("success"):
+            return components_result
+
+        by_layer = {}
+        for component in components_result.get("components", []):
+            by_layer[component.get("layer", "unknown")] = (
+                by_layer.get(component.get("layer", "unknown"), 0) + 1
+            )
+
+        return {
+            "success": True,
+            "components": components_result.get("components", []),
+            "count": len(components_result.get("components", [])),
+            "byLayer": by_layer,
+        }
+
+    def _handle_get_component_groups(self, params):
+        """Group components by reference prefix."""
+        components_result = self.component_commands.get_component_list({})
+        if not components_result.get("success"):
+            return components_result
+
+        grouped = {}
+        for component in components_result.get("components", []):
+            reference = component.get("reference", "")
+            match = re.match(r"[A-Za-z]+", reference)
+            key = match.group(0) if match else "Other"
+            grouped.setdefault(
+                key,
+                {
+                    "group": key,
+                    "count": 0,
+                    "references": [],
+                    "values": set(),
+                },
+            )
+            grouped[key]["count"] += 1
+            grouped[key]["references"].append(reference)
+            value = component.get("value")
+            if value:
+                grouped[key]["values"].add(value)
+
+        groups = []
+        for key in sorted(grouped):
+            group = grouped[key]
+            groups.append(
+                {
+                    "group": group["group"],
+                    "count": group["count"],
+                    "references": sorted(group["references"]),
+                    "values": sorted(group["values"]),
+                }
+            )
+
+        return {"success": True, "groups": groups, "count": len(groups)}
+
+    def _handle_get_component_visualization(self, params):
+        """Generate a simple footprint-centric PNG preview for a placed component."""
+        if not self.board:
+            return {
+                "success": False,
+                "message": "No board is loaded",
+                "errorDetails": "Load or create a board first",
+            }
+
+        reference = params.get("reference")
+        if not reference:
+            return {
+                "success": False,
+                "message": "Missing reference",
+                "errorDetails": "reference parameter is required",
+            }
+
+        module = self.board.FindFootprintByReference(reference)
+        if not module:
+            return {
+                "success": False,
+                "message": "Component not found",
+                "errorDetails": f"Could not find component: {reference}",
+            }
+
+        pads = list(module.Pads())
+        if not pads:
+            return {
+                "success": False,
+                "message": "Component has no pads",
+                "errorDetails": f"Component {reference} has no drawable pads",
+            }
+
+        module_pos = module.GetPosition()
+        pad_entries = []
+        min_x = min_y = float("inf")
+        max_x = max_y = float("-inf")
+
+        for pad in pads:
+            pad_pos = pad.GetPosition()
+            pad_size = pad.GetSize()
+            x_mm = (pad_pos.x - module_pos.x) / 1000000.0
+            y_mm = (pad_pos.y - module_pos.y) / 1000000.0
+            w_mm = pad_size.x / 1000000.0
+            h_mm = pad_size.y / 1000000.0
+
+            min_x = min(min_x, x_mm - w_mm / 2.0)
+            max_x = max(max_x, x_mm + w_mm / 2.0)
+            min_y = min(min_y, y_mm - h_mm / 2.0)
+            max_y = max(max_y, y_mm + h_mm / 2.0)
+
+            pad_entries.append(
+                {
+                    "x": x_mm,
+                    "y": y_mm,
+                    "w": w_mm,
+                    "h": h_mm,
+                    "shape": pad.GetShape(),
+                    "label": pad.GetNumber() or pad.GetName(),
+                }
+            )
+
+        width_px = 420
+        height_px = 420
+        padding_px = 40
+        span_x = max(max_x - min_x, 1.0)
+        span_y = max(max_y - min_y, 1.0)
+        scale = min(
+            (width_px - 2 * padding_px) / span_x,
+            (height_px - 2 * padding_px) / span_y,
+        )
+
+        image = Image.new("RGBA", (width_px, height_px), (250, 252, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            [(10, 10), (width_px - 10, height_px - 10)],
+            radius=18,
+            outline=(30, 41, 59, 255),
+            width=2,
+            fill=(255, 255, 255, 255),
+        )
+
+        body_left = padding_px
+        body_top = padding_px
+        body_right = width_px - padding_px
+        body_bottom = height_px - padding_px
+        draw.rounded_rectangle(
+            [(body_left, body_top), (body_right, body_bottom)],
+            radius=20,
+            outline=(99, 102, 241, 255),
+            width=3,
+            fill=(238, 242, 255, 255),
+        )
+
+        def to_canvas(x_mm, y_mm):
+            x_px = padding_px + (x_mm - min_x) * scale
+            y_px = height_px - padding_px - (y_mm - min_y) * scale
+            return x_px, y_px
+
+        for pad in pad_entries:
+            x_px, y_px = to_canvas(pad["x"], pad["y"])
+            half_w = (pad["w"] * scale) / 2.0
+            half_h = (pad["h"] * scale) / 2.0
+            box = [
+                x_px - half_w,
+                y_px - half_h,
+                x_px + half_w,
+                y_px + half_h,
+            ]
+
+            if pad["shape"] in {
+                pcbnew.PAD_SHAPE_CIRCLE,
+                pcbnew.PAD_SHAPE_OVAL,
+                pcbnew.PAD_SHAPE_ROUNDRECT,
+            }:
+                draw.ellipse(box, fill=(15, 118, 110, 255), outline=(15, 23, 42, 255))
+            else:
+                draw.rounded_rectangle(
+                    box,
+                    radius=6,
+                    fill=(15, 118, 110, 255),
+                    outline=(15, 23, 42, 255),
+                )
+            draw.text((box[0], box[1] - 14), str(pad["label"]), fill=(15, 23, 42, 255))
+
+        draw.text((20, 18), f"{reference} {module.GetValue()}", fill=(15, 23, 42, 255))
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return {
+            "success": True,
+            "reference": reference,
+            "format": "png",
+            "imageData": base64.b64encode(buffer.getvalue()).decode("ascii"),
+        }
+
+    def _handle_get_component_library(self, params):
+        """Return normalized symbol and footprint matches for a component query."""
+        filter_value = str(params.get("filter", "") or "").strip()
+        library_filter = str(params.get("library", "") or "").strip() or None
+        limit = int(params.get("limit", 25) or 25)
+        symbol_manager = self._get_symbol_manager()
+        footprint_manager = self._get_footprint_manager()
+        components = []
+
+        if filter_value:
+            symbols = symbol_manager.search_symbols(filter_value, limit, library_filter)
+            for symbol in symbols:
+                components.append(
+                    {
+                        "id": symbol.full_ref,
+                        "name": symbol.name,
+                        "library": symbol.library,
+                        "kind": "symbol",
+                        "description": symbol.description,
+                        "footprint": symbol.footprint,
+                        "datasheet": symbol.datasheet,
+                    }
+                )
+
+            footprint_pattern = f"*{filter_value}*"
+            footprint_result = self.library_commands.search_footprints(
+                {"pattern": footprint_pattern, "limit": limit, "library": library_filter}
+            )
+            for footprint in footprint_result.get("footprints", []):
+                components.append(
+                    {
+                        "id": footprint["full_name"],
+                        "name": footprint["footprint"],
+                        "library": footprint["library"],
+                        "kind": "footprint",
+                        "path": footprint_manager.get_library_path(footprint["library"]),
+                    }
+                )
+        else:
+            symbol_libraries = [library_filter] if library_filter else symbol_manager.list_libraries()
+            for library_name in symbol_libraries:
+                for symbol in symbol_manager.list_symbols(library_name)[: max(limit // 2, 1)]:
+                    components.append(
+                        {
+                            "id": symbol.full_ref,
+                            "name": symbol.name,
+                            "library": symbol.library,
+                            "kind": "symbol",
+                            "description": symbol.description,
+                            "footprint": symbol.footprint,
+                            "datasheet": symbol.datasheet,
+                        }
+                    )
+                    if len(components) >= limit:
+                        break
+                if len(components) >= limit:
+                    break
+
+            if len(components) < limit:
+                footprint_libraries = [library_filter] if library_filter else footprint_manager.list_libraries()
+                for library_name in footprint_libraries:
+                    footprint_result = self.library_commands.list_library_footprints(
+                        {"library": library_name}
+                    )
+                    for footprint_name in footprint_result.get("footprints", [])[: max(limit // 2, 1)]:
+                        components.append(
+                            {
+                                "id": f"{library_name}:{footprint_name}",
+                                "name": footprint_name,
+                                "library": library_name,
+                                "kind": "footprint",
+                                "path": footprint_manager.get_library_path(library_name),
+                            }
+                        )
+                        if len(components) >= limit:
+                            break
+                    if len(components) >= limit:
+                        break
+
+        return {
+            "success": True,
+            "components": components[:limit],
+            "count": len(components[:limit]),
+            "filter": filter_value,
+            "library": library_filter,
+        }
+
+    def _handle_get_library_list(self, params):
+        """Return both footprint and symbol library inventories."""
+        footprint_libraries = self.library_commands.list_libraries({})
+        symbol_libraries = self.symbol_library_commands.list_symbol_libraries({})
+
+        libraries = [
+            {"name": name, "type": "footprint"}
+            for name in footprint_libraries.get("libraries", [])
+        ] + [
+            {"name": name, "type": "symbol"}
+            for name in symbol_libraries.get("libraries", [])
+        ]
+        libraries.sort(key=lambda entry: (entry["name"], entry["type"]))
+
+        return {
+            "success": True,
+            "libraries": libraries,
+            "counts": {
+                "footprint": footprint_libraries.get("count", 0),
+                "symbol": symbol_libraries.get("count", 0),
+            },
+        }
+
+    def _handle_get_component_details(self, params):
+        """Return symbol- and footprint-centric component metadata."""
+        component_id = params.get("componentId")
+        library = params.get("library")
+        symbol = self._resolve_symbol_info(component_id, library)
+        footprint_spec = params.get("footprint")
+        if not footprint_spec and symbol and symbol.footprint:
+            footprint_spec = symbol.footprint
+        if not footprint_spec and component_id:
+            footprint_spec = component_id
+
+        footprint_result = None
+        if footprint_spec:
+            footprint_result = self.library_commands.get_footprint_info({"footprint": footprint_spec})
+
+        if not symbol and not (footprint_result and footprint_result.get("success")):
+            return {
+                "success": False,
+                "message": "Component not found",
+                "errorDetails": f"Could not resolve component: {component_id}",
+            }
+
+        return {
+            "success": True,
+            "component": asdict(symbol) if symbol else None,
+            "footprint": footprint_result.get("footprint_info")
+            if footprint_result and footprint_result.get("success")
+            else None,
+        }
+
+    def _handle_get_component_footprint(self, params):
+        """Resolve the footprint associated with a library component."""
+        component_id = params.get("componentId")
+        footprint_spec = params.get("footprint")
+        library = params.get("library")
+
+        symbol = None
+        if not footprint_spec:
+            symbol = self._resolve_symbol_info(component_id, library)
+            if symbol and symbol.footprint:
+                footprint_spec = symbol.footprint
+
+        if not footprint_spec:
+            return {
+                "success": False,
+                "message": "Footprint not found",
+                "errorDetails": f"No footprint is associated with component: {component_id}",
+            }
+
+        footprint_info = self.library_commands.get_footprint_info(
+            {"footprint": footprint_spec}
+        )
+        if not footprint_info.get("success"):
+            search_term = component_id.split(":", 1)[-1] if component_id else footprint_spec
+            suggestions = self.library_commands.search_footprints(
+                {"pattern": f"*{search_term}*", "limit": 10}
+            )
+            return {
+                "success": False,
+                "message": "Footprint not found",
+                "errorDetails": footprint_info.get("errorDetails")
+                or footprint_info.get("message"),
+                "candidates": suggestions.get("footprints", []),
+            }
+
+        loaded = self._load_footprint_object(footprint_spec)
+        footprint_payload = footprint_info.get("footprint_info", {}).copy()
+        if loaded:
+            footprint_obj = loaded["footprint"]
+            footprint_payload.update(
+                {
+                    "padCount": len(list(footprint_obj.Pads())),
+                    "libraryPath": loaded["library_path"],
+                    "fullName": loaded["full_name"],
+                }
+            )
+
+        return {
+            "success": True,
+            "componentId": component_id,
+            "footprint": footprint_payload,
+            "sourceComponent": asdict(symbol) if symbol else None,
+        }
+
+    def _handle_get_component_symbol(self, params):
+        """Resolve a symbol entry and return its metadata plus a lightweight SVG card."""
+        component_id = params.get("componentId")
+        library = params.get("library")
+        symbol = self._resolve_symbol_info(component_id, library)
+        if not symbol:
+            return {
+                "success": False,
+                "message": "Symbol not found",
+                "errorDetails": f"Could not resolve symbol for component: {component_id}",
+            }
+
+        symbol_manager = self._get_symbol_manager()
+        description = (symbol.description or "No description").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        footprint = (symbol.footprint or "No linked footprint").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        datasheet = (symbol.datasheet or "No datasheet").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        full_ref = symbol.full_ref.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="180" viewBox="0 0 420 180">
+  <rect x="10" y="10" width="400" height="160" rx="16" fill="#f4f7fb" stroke="#34537a" stroke-width="3"/>
+  <rect x="34" y="34" width="86" height="112" rx="10" fill="#ffffff" stroke="#d66b4d" stroke-width="3"/>
+  <line x1="18" y1="58" x2="34" y2="58" stroke="#d66b4d" stroke-width="3"/>
+  <line x1="18" y1="90" x2="34" y2="90" stroke="#d66b4d" stroke-width="3"/>
+  <line x1="18" y1="122" x2="34" y2="122" stroke="#d66b4d" stroke-width="3"/>
+  <line x1="120" y1="58" x2="136" y2="58" stroke="#d66b4d" stroke-width="3"/>
+  <line x1="120" y1="90" x2="136" y2="90" stroke="#d66b4d" stroke-width="3"/>
+  <line x1="120" y1="122" x2="136" y2="122" stroke="#d66b4d" stroke-width="3"/>
+  <text x="154" y="54" font-family="monospace" font-size="18" fill="#1f2a38">{full_ref}</text>
+  <text x="154" y="84" font-family="monospace" font-size="13" fill="#364659">{description}</text>
+  <text x="154" y="114" font-family="monospace" font-size="13" fill="#364659">Footprint: {footprint}</text>
+  <text x="154" y="144" font-family="monospace" font-size="13" fill="#364659">Datasheet: {datasheet}</text>
+</svg>
+""".strip()
+
+        return {
+            "success": True,
+            "symbol": asdict(symbol),
+            "libraryPath": symbol_manager.get_library_path(symbol.library),
+            "svgData": svg,
+        }
+
+    def _handle_get_component_3d_model(self, params):
+        """Return the 3D model references attached to a footprint."""
+        component_id = params.get("componentId")
+        footprint_spec = params.get("footprint")
+        footprint_obj = None
+        library_path = None
+        resolved_footprint = None
+
+        if self.board and component_id:
+            placed_component = self.board.FindFootprintByReference(component_id)
+            if placed_component:
+                footprint_obj = placed_component
+                resolved_footprint = placed_component.GetFPIDAsString()
+
+        if footprint_obj is None:
+            if not footprint_spec:
+                symbol = self._resolve_symbol_info(component_id, params.get("library"))
+                if symbol and symbol.footprint:
+                    footprint_spec = symbol.footprint
+            loaded = self._load_footprint_object(footprint_spec)
+            if not loaded:
+                return {
+                    "success": False,
+                    "message": "3D model not found",
+                    "errorDetails": f"Could not resolve footprint for component: {component_id}",
+                }
+            footprint_obj = loaded["footprint"]
+            library_path = loaded["library_path"]
+            resolved_footprint = loaded["full_name"]
+
+        models = []
+        for model in footprint_obj.Models():
+            raw_path = str(model.m_Filename)
+            resolved_path = self._resolve_model_path(raw_path, library_path)
+            models.append(
+                {
+                    "path": raw_path,
+                    "resolvedPath": resolved_path,
+                    "exists": bool(resolved_path) and os.path.exists(resolved_path),
+                    "scale": {
+                        "x": model.m_Scale.x,
+                        "y": model.m_Scale.y,
+                        "z": model.m_Scale.z,
+                    },
+                    "rotation": {
+                        "x": model.m_Rotation.x,
+                        "y": model.m_Rotation.y,
+                        "z": model.m_Rotation.z,
+                    },
+                    "offset": {
+                        "x": model.m_Offset.x,
+                        "y": model.m_Offset.y,
+                        "z": model.m_Offset.z,
+                    },
+                    "visible": bool(model.m_Show),
+                    "opacity": model.m_Opacity,
+                }
+            )
+
+        return {
+            "success": True,
+            "componentId": component_id,
+            "footprint": resolved_footprint,
+            "models": models,
+            "count": len(models),
+        }
 
     # Schematic command handlers
     def _handle_create_schematic(self, params):
@@ -583,18 +1569,9 @@ class KiCADInterface:
 
     def _handle_place_component(self, params):
         """Place a component on the PCB, with project-local fp-lib-table support."""
-        from pathlib import Path
-
         board_path = params.get("boardPath")
         if board_path:
-            project_path = Path(board_path).parent
-            if project_path != getattr(self, "_current_project_path", None):
-                self._current_project_path = project_path
-                local_lib = FootprintLibraryManager(project_path=project_path)
-                self.component_commands = ComponentCommands(self.board, local_lib)
-                logger.info(
-                    f"Reloaded FootprintLibraryManager with project_path={project_path}"
-                )
+            self._set_project_context_from_paths(board_path)
 
         return self.component_commands.place_component(params)
 

@@ -220,6 +220,7 @@ export class KiCADMcpServer {
     reject: Function;
     timeoutHandle: NodeJS.Timeout;
   } | null = null;
+  private pythonStderrBuffer = "";
 
   private buildPythonEnv(): NodeJS.ProcessEnv {
     const env = { ...process.env };
@@ -240,7 +241,7 @@ export class KiCADMcpServer {
    */
   constructor(
     kicadScriptPath: string,
-    logLevel: "error" | "warn" | "info" | "debug" = "info",
+    logLevel: "error" | "warn" | "info" | "debug" = "warn",
   ) {
     // Set up the logger
     logger.setLogLevel(logLevel);
@@ -272,12 +273,8 @@ export class KiCADMcpServer {
    * Register all tools, resources, and prompts
    */
   private registerAll(): void {
-    logger.info("Registering KiCAD tools, resources, and prompts...");
+    logger.info("Registering KiCAD MCP runtime surface");
 
-    // Register router tools FIRST (for tool discovery and execution)
-    registerRouterTools(this.server, this.callKicadScript.bind(this));
-
-    // Register all tools
     registerProjectTools(this.server, this.callKicadScript.bind(this));
     registerBoardTools(this.server, this.callKicadScript.bind(this));
     registerComponentTools(this.server, this.callKicadScript.bind(this));
@@ -287,28 +284,65 @@ export class KiCADMcpServer {
     registerSchematicTools(this.server, this.callKicadScript.bind(this));
     registerLibraryTools(this.server, this.callKicadScript.bind(this));
     registerSymbolLibraryTools(this.server, this.callKicadScript.bind(this));
-    registerJLCPCBApiTools(this.server, this.callKicadScript.bind(this));
     registerDatasheetTools(this.server, this.callKicadScript.bind(this));
+    registerRouterTools(this.server, this.callKicadScript.bind(this));
+    registerJLCPCBApiTools(this.server, this.callKicadScript.bind(this));
     registerFootprintTools(this.server, this.callKicadScript.bind(this));
     registerSymbolCreatorTools(this.server, this.callKicadScript.bind(this));
     registerUITools(this.server, this.callKicadScript.bind(this));
 
-    // Register all resources
     registerProjectResources(this.server, this.callKicadScript.bind(this));
     registerBoardResources(this.server, this.callKicadScript.bind(this));
     registerComponentResources(this.server, this.callKicadScript.bind(this));
     registerLibraryResources(this.server, this.callKicadScript.bind(this));
 
-    // Register all prompts
     registerComponentPrompts(this.server);
     registerRoutingPrompts(this.server);
     registerDesignPrompts(this.server);
     registerFootprintPrompts(this.server);
 
-    logger.info("All KiCAD tools, resources, and prompts registered");
-    logger.info(
-      "Router pattern enabled: 4 router tools + direct tools for discovery",
-    );
+    logger.info("KiCAD MCP runtime registration complete");
+  }
+
+  private logPythonStderrLine(rawLine: string): void {
+    const line = rawLine.trim();
+    if (!line) {
+      return;
+    }
+
+    const severityMatch = line.match(/\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]/i);
+    const message = `python ${line}`;
+
+    switch (severityMatch?.[1]?.toUpperCase()) {
+      case "DEBUG":
+        logger.debug(message);
+        return;
+      case "INFO":
+        logger.info(message);
+        return;
+      case "WARNING":
+        logger.warn(message);
+        return;
+      case "ERROR":
+      case "CRITICAL":
+        logger.error(message);
+        return;
+      default:
+        if (/(traceback|exception|error)/i.test(line)) {
+          logger.error(message);
+          return;
+        }
+        logger.debug(message);
+    }
+  }
+
+  private handlePythonStderr(data: Buffer): void {
+    this.pythonStderrBuffer += data.toString();
+    const lines = this.pythonStderrBuffer.split(/\r?\n/);
+    this.pythonStderrBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      this.logPythonStderrLine(line);
+    }
   }
 
   /**
@@ -520,6 +554,10 @@ export class KiCADMcpServer {
 
       // Listen for process exit
       this.pythonProcess.on("exit", (code, signal) => {
+        if (this.pythonStderrBuffer.trim()) {
+          this.logPythonStderrLine(this.pythonStderrBuffer);
+          this.pythonStderrBuffer = "";
+        }
         logger.warn(
           `Python process exited with code ${code} and signal ${signal}`,
         );
@@ -534,7 +572,7 @@ export class KiCADMcpServer {
       // Set up error logging for stderr
       if (this.pythonProcess.stderr) {
         this.pythonProcess.stderr.on("data", (data: Buffer) => {
-          logger.error(`Python stderr: ${data.toString()}`);
+          this.handlePythonStderr(data);
         });
       }
 
@@ -554,9 +592,6 @@ export class KiCADMcpServer {
         logger.error(`Failed to connect to STDIO transport: ${error}`);
         throw error;
       }
-
-      // Write a ready message to stderr (for debugging)
-      process.stderr.write("KiCAD MCP SERVER READY\n");
 
       logger.info("KiCAD MCP server started and ready");
     } catch (error) {

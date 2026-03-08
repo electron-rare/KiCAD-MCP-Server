@@ -43,7 +43,7 @@ class LibraryManager:
             logger.info(f"Loading global fp-lib-table from: {global_table}")
             self._parse_fp_lib_table(global_table)
         else:
-            logger.warning(f"Global fp-lib-table not found at: {global_table}")
+            logger.info(f"Global fp-lib-table not found at: {global_table}")
 
         # Load project-specific libraries if project path provided
         if self.project_path:
@@ -312,7 +312,7 @@ class LibraryManager:
                 logger.info(f"Found KiCad 3rd party directory: {candidate}")
                 return str(candidate)
 
-        logger.warning("Could not find KiCad 3rd party directory")
+        logger.info("Could not find KiCad 3rd party directory")
         return None
 
     def list_libraries(self) -> List[str]:

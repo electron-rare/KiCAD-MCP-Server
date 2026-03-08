@@ -62,7 +62,7 @@ class SymbolLibraryManager:
             logger.info(f"Loading global sym-lib-table from: {global_table}")
             self._parse_sym_lib_table(global_table)
         else:
-            logger.warning(f"Global sym-lib-table not found at: {global_table}")
+            logger.info(f"Global sym-lib-table not found at: {global_table}")
 
         # Load project-specific libraries if project path provided
         if self.project_path:

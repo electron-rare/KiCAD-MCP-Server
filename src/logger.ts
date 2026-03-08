@@ -16,7 +16,7 @@ const DEFAULT_LOG_DIR = join(os.homedir(), '.kicad-mcp', 'logs');
  * Logger class for KiCAD MCP server
  */
 class Logger {
-  private logLevel: LogLevel = 'info';
+  private logLevel: LogLevel = 'warn';
   private logDir: string = DEFAULT_LOG_DIR;
   
   /**

@@ -1006,15 +1006,14 @@ class RoutingCommands:
                     "errorDetails": "name parameter is required",
                 }
 
-            # Get net classes
+            # KiCad 10 exposes netclasses_map with lowercase helpers and item assignment.
             net_classes = self.board.GetNetClasses()
 
-            # Create new net class if it doesn't exist
-            if not net_classes.Find(name):
-                netclass = pcbnew.NETCLASS(name)
-                net_classes.Add(netclass)
+            if net_classes.has_key(name):
+                netclass = net_classes[name]
             else:
-                netclass = net_classes.Find(name)
+                netclass = pcbnew.NETCLASS(name)
+                net_classes[name] = netclass
 
             # Set properties
             scale = 1000000  # mm to nm
@@ -1027,9 +1026,9 @@ class RoutingCommands:
             if via_drill is not None:
                 netclass.SetViaDrill(int(via_drill * scale))
             if uvia_diameter is not None:
-                netclass.SetMicroViaDiameter(int(uvia_diameter * scale))
+                netclass.SetuViaDiameter(int(uvia_diameter * scale))
             if uvia_drill is not None:
-                netclass.SetMicroViaDrill(int(uvia_drill * scale))
+                netclass.SetuViaDrill(int(uvia_drill * scale))
             if diff_pair_width is not None:
                 netclass.SetDiffPairWidth(int(diff_pair_width * scale))
             if diff_pair_gap is not None:
@@ -1052,8 +1051,8 @@ class RoutingCommands:
                     "trackWidth": netclass.GetTrackWidth() / scale,
                     "viaDiameter": netclass.GetViaDiameter() / scale,
                     "viaDrill": netclass.GetViaDrill() / scale,
-                    "uviaDiameter": netclass.GetMicroViaDiameter() / scale,
-                    "uviaDrill": netclass.GetMicroViaDrill() / scale,
+                    "uviaDiameter": netclass.GetuViaDiameter() / scale,
+                    "uviaDrill": netclass.GetuViaDrill() / scale,
                     "diffPairWidth": netclass.GetDiffPairWidth() / scale,
                     "diffPairGap": netclass.GetDiffPairGap() / scale,
                     "nets": nets,

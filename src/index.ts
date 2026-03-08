@@ -31,7 +31,7 @@ async function main() {
     // Create the server
     const server = new KiCADMcpServer(
       kicadScriptPath,
-      config.logLevel
+      config.logLevel,
     );
     
     // Start the server

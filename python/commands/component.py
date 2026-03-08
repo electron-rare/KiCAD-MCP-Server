@@ -8,7 +8,9 @@ import logging
 import math
 from typing import Dict, Any, Optional, List, Tuple
 import base64
+import io
 from commands.library import LibraryManager
+from PIL import Image, ImageDraw
 
 logger = logging.getLogger('kicad_interface')
 
@@ -1014,6 +1016,498 @@ class ComponentCommands:
                 "success": False,
                 "message": "Failed to duplicate component",
                 "errorDetails": str(e)
+            }
+
+    def add_component_annotation(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Add a text annotation close to a component footprint."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            reference = params.get("reference")
+            annotation = params.get("annotation")
+            visible = params.get("visible", True)
+
+            if not reference or not annotation:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": "reference and annotation are required",
+                }
+
+            module = self.board.FindFootprintByReference(reference)
+            if not module:
+                return {
+                    "success": False,
+                    "message": "Component not found",
+                    "errorDetails": f"Could not find component: {reference}",
+                }
+
+            bbox = module.GetBoundingBox()
+            layer_name = "B.SilkS" if self.board.GetLayerName(module.GetLayer()).startswith("B.") else "F.SilkS"
+            layer_id = self.board.GetLayerID(layer_name)
+
+            text_item = pcbnew.PCB_TEXT(self.board)
+            text_item.SetText(annotation)
+            text_item.SetLayer(layer_id)
+            text_item.SetPosition(
+                pcbnew.VECTOR2I(
+                    bbox.GetRight() + 800000,
+                    bbox.GetTop() - 800000,
+                )
+            )
+            text_item.SetTextSize(pcbnew.VECTOR2I(1000000, 1000000))
+            text_item.SetTextThickness(150000)
+            if hasattr(text_item, "SetVisible"):
+                text_item.SetVisible(bool(visible))
+
+            self.board.Add(text_item)
+
+            return {
+                "success": True,
+                "message": f"Added annotation to {reference}",
+                "annotation": {
+                    "reference": reference,
+                    "text": annotation,
+                    "layer": layer_name,
+                    "visible": bool(visible),
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error adding component annotation: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to add component annotation",
+                "errorDetails": str(e),
+            }
+
+    def group_components(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Create or extend a real KiCad PCB group with the selected components."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            references = params.get("references", [])
+            group_name = params.get("groupName")
+            if not references or not group_name:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": "references and groupName are required",
+                }
+
+            modules = []
+            missing = []
+            for reference in references:
+                module = self.board.FindFootprintByReference(reference)
+                if not module:
+                    missing.append(reference)
+                    continue
+                modules.append(module)
+
+            if not modules:
+                return {
+                    "success": False,
+                    "message": "No valid components found",
+                    "errorDetails": f"Missing references: {', '.join(missing)}",
+                }
+
+            group = None
+            if hasattr(self.board, "Groups"):
+                for existing in self.board.Groups():
+                    name = existing.GetName() if hasattr(existing, "GetName") else ""
+                    if name == group_name:
+                        group = existing
+                        break
+
+            if group is None:
+                group = pcbnew.PCB_GROUP(self.board)
+                if hasattr(group, "SetName"):
+                    group.SetName(group_name)
+                self.board.Add(group)
+
+            for module in modules:
+                group.AddItem(module)
+                if hasattr(module, "SetParentGroup"):
+                    module.SetParentGroup(group)
+
+            return {
+                "success": True,
+                "message": f"Grouped {len(modules)} component(s) into {group_name}",
+                "group": {
+                    "name": group_name,
+                    "references": [module.GetReference() for module in modules],
+                    "missing": missing,
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error grouping components: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to group components",
+                "errorDetails": str(e),
+            }
+
+    def replace_component(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Replace a component footprint while preserving placement and reference."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            reference = params.get("reference")
+            new_component_id = params.get("newComponentId")
+            new_footprint = params.get("newFootprint")
+            new_value = params.get("newValue")
+
+            if not reference or not new_component_id:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": "reference and newComponentId are required",
+                }
+
+            module = self.board.FindFootprintByReference(reference)
+            if not module:
+                return {
+                    "success": False,
+                    "message": "Component not found",
+                    "errorDetails": f"Could not find component: {reference}",
+                }
+
+            pos = module.GetPosition()
+            layer = self.board.GetLayerName(module.GetLayer())
+            rotation = module.GetOrientation().AsDegrees()
+            value = new_value or module.GetValue()
+            temp_reference = f"{reference}_TMP"
+            replacement_spec = new_footprint or new_component_id
+
+            place_result = self.place_component(
+                {
+                    "componentId": new_component_id,
+                    "position": {
+                        "x": pos.x / 1000000,
+                        "y": pos.y / 1000000,
+                        "unit": "mm",
+                    },
+                    "reference": temp_reference,
+                    "value": value,
+                    "footprint": replacement_spec,
+                    "rotation": rotation,
+                    "layer": layer,
+                }
+            )
+            if not place_result.get("success"):
+                return place_result
+
+            delete_result = self.delete_component({"reference": reference})
+            if not delete_result.get("success"):
+                return delete_result
+
+            rename_result = self.edit_component(
+                {
+                    "reference": temp_reference,
+                    "newReference": reference,
+                    "value": value,
+                    "footprint": replacement_spec,
+                }
+            )
+            if not rename_result.get("success"):
+                return rename_result
+
+            return {
+                "success": True,
+                "message": f"Replaced component {reference}",
+                "component": {
+                    "reference": reference,
+                    "newComponentId": new_component_id,
+                    "footprint": replacement_spec,
+                    "value": value,
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error replacing component: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to replace component",
+                "errorDetails": str(e),
+            }
+
+    def get_component_connections(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get pad and net connectivity for a component."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            reference = params.get("reference")
+            if not reference:
+                return {
+                    "success": False,
+                    "message": "Missing reference",
+                    "errorDetails": "reference parameter is required",
+                }
+
+            module = self.board.FindFootprintByReference(reference)
+            if not module:
+                return {
+                    "success": False,
+                    "message": "Component not found",
+                    "errorDetails": f"Could not find component: {reference}",
+                }
+
+            nets = {}
+            pads = []
+            for pad in module.Pads():
+                net_name = pad.GetNetname() or ""
+                pad_entry = {
+                    "pad": pad.GetNumber(),
+                    "net": net_name,
+                    "position": {
+                        "x": pad.GetPosition().x / 1000000,
+                        "y": pad.GetPosition().y / 1000000,
+                        "unit": "mm",
+                    },
+                }
+                pads.append(pad_entry)
+                if net_name:
+                    nets.setdefault(net_name, []).append(pad.GetNumber())
+
+            related_components = {}
+            for other in self.board.GetFootprints():
+                other_ref = other.GetReference()
+                if other_ref == reference:
+                    continue
+                for pad in other.Pads():
+                    net_name = pad.GetNetname() or ""
+                    if net_name and net_name in nets:
+                        related_components.setdefault(net_name, set()).add(other_ref)
+
+            return {
+                "success": True,
+                "reference": reference,
+                "pads": pads,
+                "connections": [
+                    {
+                        "net": net_name,
+                        "pads": pad_numbers,
+                        "connectedReferences": sorted(related_components.get(net_name, set())),
+                    }
+                    for net_name, pad_numbers in sorted(nets.items())
+                ],
+            }
+        except Exception as e:
+            logger.error(f"Error getting component connections: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get component connections",
+                "errorDetails": str(e),
+            }
+
+    def get_component_placement(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get placement data for all components on the board."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            placements = []
+            for module in self.board.GetFootprints():
+                bbox = module.GetBoundingBox()
+                placements.append(
+                    {
+                        "reference": module.GetReference(),
+                        "value": module.GetValue(),
+                        "footprint": module.GetFPIDAsString(),
+                        "layer": self.board.GetLayerName(module.GetLayer()),
+                        "position": {
+                            "x": module.GetPosition().x / 1000000,
+                            "y": module.GetPosition().y / 1000000,
+                            "unit": "mm",
+                        },
+                        "rotation": module.GetOrientation().AsDegrees(),
+                        "bounds": {
+                            "left": bbox.GetLeft() / 1000000,
+                            "top": bbox.GetTop() / 1000000,
+                            "right": bbox.GetRight() / 1000000,
+                            "bottom": bbox.GetBottom() / 1000000,
+                            "unit": "mm",
+                        },
+                    }
+                )
+
+            return {
+                "success": True,
+                "placements": placements,
+                "count": len(placements),
+            }
+        except Exception as e:
+            logger.error(f"Error getting component placement: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get component placement",
+                "errorDetails": str(e),
+            }
+
+    def get_component_groups(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get explicit KiCad groups, or derived prefix groups when none exist."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            grouped = {}
+            derived = {}
+            for module in self.board.GetFootprints():
+                reference = module.GetReference()
+                parent_group = module.GetParentGroup() if hasattr(module, "GetParentGroup") else None
+                if parent_group:
+                    name = ""
+                    if hasattr(parent_group, "GetName"):
+                        name = parent_group.GetName()
+                    if not name and hasattr(parent_group, "GetFriendlyName"):
+                        name = parent_group.GetFriendlyName()
+                    name = name or "unnamed-group"
+                    grouped.setdefault(name, {"name": name, "source": "board", "references": []})
+                    grouped[name]["references"].append(reference)
+                else:
+                    prefix = "".join(ch for ch in reference if ch.isalpha()) or "misc"
+                    derived.setdefault(prefix, {"name": prefix, "source": "derived-prefix", "references": []})
+                    derived[prefix]["references"].append(reference)
+
+            groups = list(grouped.values()) if grouped else list(derived.values())
+            for group in groups:
+                group["references"].sort()
+                group["count"] = len(group["references"])
+
+            return {
+                "success": True,
+                "groups": sorted(groups, key=lambda group: group["name"]),
+                "count": len(groups),
+            }
+        except Exception as e:
+            logger.error(f"Error getting component groups: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get component groups",
+                "errorDetails": str(e),
+            }
+
+    def get_component_visualization(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Render a lightweight top-down PNG preview for a component footprint."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            reference = params.get("reference")
+            if not reference:
+                return {
+                    "success": False,
+                    "message": "Missing reference",
+                    "errorDetails": "reference parameter is required",
+                }
+
+            module = self.board.FindFootprintByReference(reference)
+            if not module:
+                return {
+                    "success": False,
+                    "message": "Component not found",
+                    "errorDetails": f"Could not find component: {reference}",
+                }
+
+            bbox = module.GetBoundingBox()
+            margin_nm = 500000
+            min_x = bbox.GetLeft() - margin_nm
+            min_y = bbox.GetTop() - margin_nm
+            max_x = bbox.GetRight() + margin_nm
+            max_y = bbox.GetBottom() + margin_nm
+
+            width_nm = max(max_x - min_x, 1000000)
+            height_nm = max(max_y - min_y, 1000000)
+            canvas_size = 320
+            padding = 20
+            scale = min(
+                (canvas_size - 2 * padding) / width_nm,
+                (canvas_size - 2 * padding) / height_nm,
+            )
+
+            def to_px(x_nm: int, y_nm: int) -> Tuple[int, int]:
+                x = padding + int((x_nm - min_x) * scale)
+                y = padding + int((y_nm - min_y) * scale)
+                return x, y
+
+            image = Image.new("RGBA", (canvas_size, canvas_size), (255, 255, 255, 0))
+            draw = ImageDraw.Draw(image)
+
+            body_left, body_top = to_px(bbox.GetLeft(), bbox.GetTop())
+            body_right, body_bottom = to_px(bbox.GetRight(), bbox.GetBottom())
+            draw.rounded_rectangle(
+                [body_left, body_top, body_right, body_bottom],
+                radius=10,
+                outline=(36, 74, 124, 255),
+                width=3,
+                fill=(230, 238, 250, 180),
+            )
+
+            for pad in module.Pads():
+                pad_box = pad.GetBoundingBox()
+                x0, y0 = to_px(pad_box.GetLeft(), pad_box.GetTop())
+                x1, y1 = to_px(pad_box.GetRight(), pad_box.GetBottom())
+                shape = pad.GetShape()
+                circle_shapes = {
+                    getattr(pcbnew, "PAD_SHAPE_CIRCLE", object()),
+                    getattr(pcbnew, "PAD_SHAPE_OVAL", object()),
+                }
+                if shape in circle_shapes:
+                    draw.ellipse([x0, y0, x1, y1], fill=(201, 96, 74, 255), outline=(122, 41, 27, 255))
+                else:
+                    draw.rounded_rectangle(
+                        [x0, y0, x1, y1],
+                        radius=4,
+                        fill=(201, 96, 74, 255),
+                        outline=(122, 41, 27, 255),
+                    )
+
+            draw.text((16, 12), reference, fill=(22, 22, 22, 255))
+
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return {
+                "success": True,
+                "imageData": base64.b64encode(buffer.getvalue()).decode("utf-8"),
+                "format": "png",
+                "reference": reference,
+            }
+        except Exception as e:
+            logger.error(f"Error getting component visualization: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get component visualization",
+                "errorDetails": str(e),
             }
             
     def _place_grid_array(self, component_id: str, start_position: Dict[str, Any], 

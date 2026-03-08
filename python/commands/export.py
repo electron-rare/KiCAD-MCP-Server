@@ -7,6 +7,7 @@ import pcbnew
 import logging
 from typing import Dict, Any, Optional, List, Tuple
 import base64
+import subprocess
 
 logger = logging.getLogger("kicad_interface")
 
@@ -555,6 +556,179 @@ class ExportCommands:
                 "message": "Failed to export BOM",
                 "errorDetails": str(e),
             }
+
+    def export_netlist(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Export the current project's schematic netlist using kicad-cli."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            output_path = params.get("outputPath")
+            if not output_path:
+                return {
+                    "success": False,
+                    "message": "Missing output path",
+                    "errorDetails": "outputPath parameter is required",
+                }
+
+            board_file = self.board.GetFileName()
+            if not board_file:
+                return {
+                    "success": False,
+                    "message": "Board file not found",
+                    "errorDetails": "Save the board before exporting a netlist",
+                }
+
+            schematic_path = os.path.splitext(board_file)[0] + ".kicad_sch"
+            if not os.path.exists(schematic_path):
+                return {
+                    "success": False,
+                    "message": "Schematic file not found",
+                    "errorDetails": f"No schematic found at {schematic_path}",
+                }
+
+            output_path = os.path.abspath(os.path.expanduser(output_path))
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+            format_map = {
+                "kicad": "kicadsexpr",
+                "spice": "spice",
+                "cadstar": "cadstar",
+                "orcadpcb2": "orcadpcb2",
+            }
+            format_name = str(params.get("format", "KiCad")).lower()
+            cli_format = format_map.get(format_name, "kicadsexpr")
+
+            kicad_cli = self._find_kicad_cli()
+            if not kicad_cli:
+                return {
+                    "success": False,
+                    "message": "kicad-cli not found",
+                    "errorDetails": "KiCad CLI is required for netlist export",
+                }
+
+            cmd = [
+                kicad_cli,
+                "sch",
+                "export",
+                "netlist",
+                "--output",
+                output_path,
+                "--format",
+                cli_format,
+                schematic_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            if result.returncode != 0:
+                return {
+                    "success": False,
+                    "message": "Netlist export failed",
+                    "errorDetails": result.stderr.strip() or result.stdout.strip(),
+                }
+
+            return {
+                "success": True,
+                "message": "Exported netlist",
+                "file": {"path": output_path, "format": cli_format, "schematicPath": schematic_path},
+            }
+        except Exception as e:
+            logger.error(f"Error exporting netlist: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to export netlist",
+                "errorDetails": str(e),
+            }
+
+    def export_position_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Export a pick-and-place position file using kicad-cli."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            output_path = params.get("outputPath")
+            if not output_path:
+                return {
+                    "success": False,
+                    "message": "Missing output path",
+                    "errorDetails": "outputPath parameter is required",
+                }
+
+            board_file = self.board.GetFileName()
+            if not board_file or not os.path.exists(board_file):
+                return {
+                    "success": False,
+                    "message": "Board file not found",
+                    "errorDetails": "Save the board before exporting a position file",
+                }
+
+            output_path = os.path.abspath(os.path.expanduser(output_path))
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+            side_map = {"top": "front", "bottom": "back", "both": "both"}
+            format_map = {"csv": "csv", "ascii": "ascii"}
+            units_map = {"mm": "mm", "inch": "in"}
+
+            side = side_map.get(str(params.get("side", "both")).lower(), "both")
+            format_name = format_map.get(str(params.get("format", "ASCII")).lower(), "ascii")
+            units = units_map.get(str(params.get("units", "mm")).lower(), "mm")
+
+            kicad_cli = self._find_kicad_cli()
+            if not kicad_cli:
+                return {
+                    "success": False,
+                    "message": "kicad-cli not found",
+                    "errorDetails": "KiCad CLI is required for position export",
+                }
+
+            cmd = [
+                kicad_cli,
+                "pcb",
+                "export",
+                "pos",
+                "--output",
+                output_path,
+                "--side",
+                side,
+                "--format",
+                format_name,
+                "--units",
+                units,
+                board_file,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            if result.returncode != 0:
+                return {
+                    "success": False,
+                    "message": "Position export failed",
+                    "errorDetails": result.stderr.strip() or result.stdout.strip(),
+                }
+
+            return {
+                "success": True,
+                "message": "Exported position file",
+                "file": {"path": output_path, "format": format_name, "units": units, "side": side},
+            }
+        except Exception as e:
+            logger.error(f"Error exporting position file: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to export position file",
+                "errorDetails": str(e),
+            }
+
+    def export_vrml(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Export VRML via the generic 3D export path."""
+        bridged = dict(params)
+        bridged["format"] = "VRML"
+        return self.export_3d(bridged)
 
     def _export_bom_csv(self, path: str, components: List[Dict[str, Any]]) -> None:
         """Export BOM to CSV format"""

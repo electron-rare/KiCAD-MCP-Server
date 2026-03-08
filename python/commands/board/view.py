@@ -9,6 +9,9 @@ from typing import Dict, Any, Optional, List, Tuple
 from PIL import Image
 import io
 import base64
+import tempfile
+import subprocess
+import shutil
 
 logger = logging.getLogger('kicad_interface')
 
@@ -229,4 +232,104 @@ class BoardViewCommands:
                 "success": False,
                 "message": "Failed to get board extents",
                 "errorDetails": str(e)
+            }
+
+    def _find_kicad_cli(self) -> Optional[str]:
+        return shutil.which("kicad-cli")
+
+    def get_board_3d_view(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Render a 3D board preview using kicad-cli."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            board_file = self.board.GetFileName()
+            if not board_file or not os.path.exists(board_file):
+                return {
+                    "success": False,
+                    "message": "Board file not found",
+                    "errorDetails": "Save the board before requesting a 3D preview",
+                }
+
+            kicad_cli = self._find_kicad_cli()
+            if not kicad_cli:
+                return {
+                    "success": False,
+                    "message": "kicad-cli not found",
+                    "errorDetails": "KiCad CLI is required for 3D renders",
+                }
+
+            angle = str(params.get("angle", "isometric")).lower()
+            width = int(params.get("width", 1600))
+            height = int(params.get("height", 900))
+
+            render_args = []
+            if angle == "isometric":
+                render_args.extend(["--side", "top", "--rotate", "-45,0,45", "--perspective"])
+            elif angle in {"top", "bottom", "left", "right", "front", "back"}:
+                render_args.extend(["--side", angle])
+            else:
+                return {
+                    "success": False,
+                    "message": "Unsupported angle",
+                    "errorDetails": f"Angle '{angle}' is not supported",
+                }
+
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                output_path = tmp.name
+
+            try:
+                cmd = [
+                    kicad_cli,
+                    "pcb",
+                    "render",
+                    "--output",
+                    output_path,
+                    "--width",
+                    str(width),
+                    "--height",
+                    str(height),
+                    "--background",
+                    "transparent",
+                    "--quality",
+                    "high",
+                    *render_args,
+                    board_file,
+                ]
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if result.returncode != 0:
+                    return {
+                        "success": False,
+                        "message": "3D render failed",
+                        "errorDetails": result.stderr.strip() or result.stdout.strip(),
+                    }
+
+                with open(output_path, "rb") as f:
+                    image_bytes = f.read()
+
+                return {
+                    "success": True,
+                    "imageData": base64.b64encode(image_bytes).decode("utf-8"),
+                    "format": "png",
+                    "angle": angle,
+                }
+            finally:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+        except Exception as e:
+            logger.error(f"Error getting board 3D view: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get board 3D view",
+                "errorDetails": str(e),
             }

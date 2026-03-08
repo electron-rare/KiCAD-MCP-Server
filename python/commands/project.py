@@ -7,6 +7,7 @@ import pcbnew  # type: ignore
 import logging
 import shutil
 from typing import Dict, Any, Optional
+from datetime import datetime
 
 logger = logging.getLogger("kicad_interface")
 
@@ -17,6 +18,26 @@ class ProjectCommands:
     def __init__(self, board: Optional[pcbnew.BOARD] = None):
         """Initialize with optional board instance"""
         self.board = board
+
+    def _get_project_context(self) -> Optional[Dict[str, str]]:
+        if not self.board:
+            return None
+
+        board_path = self.board.GetFileName()
+        if not board_path:
+            return None
+
+        board_path = os.path.abspath(os.path.expanduser(board_path))
+        project_root, board_name = os.path.split(board_path)
+        project_stem, _ = os.path.splitext(board_name)
+
+        return {
+            "board_path": board_path,
+            "project_root": project_root,
+            "project_name": project_stem,
+            "project_file": os.path.join(project_root, f"{project_stem}.kicad_pro"),
+            "schematic_file": os.path.join(project_root, f"{project_stem}.kicad_sch"),
+        }
 
     def create_project(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new KiCAD project"""
@@ -256,5 +277,165 @@ class ProjectCommands:
             return {
                 "success": False,
                 "message": "Failed to get project information",
+                "errorDetails": str(e),
+            }
+
+    def get_project_properties(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get resolved project file paths and title block metadata."""
+        try:
+            context = self._get_project_context()
+            if not context:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            title_block = self.board.GetTitleBlock()
+            project_file = context["project_file"]
+            board_path = context["board_path"]
+            schematic_file = context["schematic_file"]
+
+            return {
+                "success": True,
+                "properties": {
+                    "projectName": context["project_name"],
+                    "projectRoot": context["project_root"],
+                    "projectFile": project_file,
+                    "boardFile": board_path,
+                    "schematicFile": schematic_file,
+                    "exists": {
+                        "projectFile": os.path.exists(project_file),
+                        "boardFile": os.path.exists(board_path),
+                        "schematicFile": os.path.exists(schematic_file),
+                    },
+                    "titleBlock": {
+                        "title": title_block.GetTitle(),
+                        "date": title_block.GetDate(),
+                        "revision": title_block.GetRevision(),
+                        "company": title_block.GetCompany(),
+                        "comment1": title_block.GetComment(0),
+                        "comment2": title_block.GetComment(1),
+                        "comment3": title_block.GetComment(2),
+                        "comment4": title_block.GetComment(3),
+                    },
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error getting project properties: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get project properties",
+                "errorDetails": str(e),
+            }
+
+    def get_project_files(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """List the files that make up the current KiCad project directory."""
+        try:
+            context = self._get_project_context()
+            if not context:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            project_root = context["project_root"]
+            project_name = context["project_name"]
+            files = []
+
+            for entry in sorted(os.listdir(project_root)):
+                path = os.path.join(project_root, entry)
+                if not os.path.isfile(path):
+                    continue
+
+                if not (
+                    entry.startswith(project_name)
+                    or entry in {"fp-lib-table", "sym-lib-table"}
+                    or entry.endswith(
+                        (
+                            ".kicad_pro",
+                            ".kicad_prl",
+                            ".kicad_pcb",
+                            ".kicad_sch",
+                            ".dru",
+                            ".json",
+                            ".csv",
+                            ".txt",
+                        )
+                    )
+                ):
+                    continue
+
+                ext = os.path.splitext(entry)[1].lower()
+                file_type = {
+                    ".kicad_pro": "project",
+                    ".kicad_prl": "local-settings",
+                    ".kicad_pcb": "board",
+                    ".kicad_sch": "schematic",
+                    ".kicad_dru": "design-rules",
+                    ".csv": "report",
+                    ".json": "report",
+                    ".txt": "report",
+                }.get(ext, "auxiliary")
+
+                stat = os.stat(path)
+                files.append(
+                    {
+                        "name": entry,
+                        "path": path,
+                        "type": file_type,
+                        "sizeBytes": stat.st_size,
+                        "modifiedAt": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    }
+                )
+
+            return {
+                "success": True,
+                "projectRoot": project_root,
+                "files": files,
+                "count": len(files),
+            }
+        except Exception as e:
+            logger.error(f"Error getting project files: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get project files",
+                "errorDetails": str(e),
+            }
+
+    def get_project_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get the runtime status of the current project."""
+        try:
+            context = self._get_project_context()
+            if not context:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            files_result = self.get_project_files({})
+            board_box = self.board.GetBoardEdgesBoundingBox()
+
+            return {
+                "success": True,
+                "status": {
+                    "projectName": context["project_name"],
+                    "projectRoot": context["project_root"],
+                    "boardLoaded": self.board is not None,
+                    "boardSaved": bool(context["board_path"]) and os.path.exists(context["board_path"]),
+                    "projectFileExists": os.path.exists(context["project_file"]),
+                    "schematicFileExists": os.path.exists(context["schematic_file"]),
+                    "boardOutlinePresent": board_box.GetWidth() > 0 and board_box.GetHeight() > 0,
+                    "componentCount": len(list(self.board.GetFootprints())),
+                    "fileCount": files_result.get("count", 0),
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error getting project status: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to get project status",
                 "errorDetails": str(e),
             }

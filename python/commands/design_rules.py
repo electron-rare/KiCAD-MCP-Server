@@ -6,6 +6,7 @@ import os
 import pcbnew
 import logging
 from typing import Dict, Any, Optional, List, Tuple
+import json
 
 logger = logging.getLogger("kicad_interface")
 
@@ -470,5 +471,186 @@ class DesignRuleCommands:
             return {
                 "success": False,
                 "message": "Failed to get DRC violations",
+                "errorDetails": str(e),
+            }
+
+    def _get_project_file(self) -> Optional[str]:
+        if not self.board:
+            return None
+        board_file = self.board.GetFileName()
+        if not board_file:
+            return None
+        return os.path.splitext(board_file)[0] + ".kicad_pro"
+
+    def assign_net_to_class(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Assign an existing net to an existing net class."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            net_name = params.get("net")
+            net_class_name = params.get("netClass")
+            if not net_name or not net_class_name:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": "net and netClass are required",
+                }
+
+            net_classes = self.board.GetNetClasses()
+            net_class = net_classes.Find(net_class_name)
+            if not net_class:
+                return {
+                    "success": False,
+                    "message": "Net class not found",
+                    "errorDetails": f"Net class '{net_class_name}' does not exist",
+                }
+
+            nets_map = self.board.GetNetInfo().NetsByName()
+            if not nets_map.has_key(net_name):
+                return {
+                    "success": False,
+                    "message": "Net not found",
+                    "errorDetails": f"Net '{net_name}' does not exist",
+                }
+
+            net = nets_map[net_name]
+            net.SetClass(net_class)
+
+            return {
+                "success": True,
+                "message": f"Assigned net {net_name} to class {net_class_name}",
+                "assignment": {"net": net_name, "netClass": net_class_name},
+            }
+        except Exception as e:
+            logger.error(f"Error assigning net to class: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to assign net to class",
+                "errorDetails": str(e),
+            }
+
+    def set_layer_constraints(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist layer-specific constraints in the project file under kicad_mcp."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            layer = params.get("layer")
+            if not layer:
+                return {
+                    "success": False,
+                    "message": "Missing layer parameter",
+                    "errorDetails": "layer is required",
+                }
+
+            project_file = self._get_project_file()
+            if not project_file:
+                return {
+                    "success": False,
+                    "message": "Project file unavailable",
+                    "errorDetails": "Save the board before setting layer constraints",
+                }
+
+            payload = {}
+            if os.path.exists(project_file):
+                with open(project_file, "r", encoding="utf-8") as f:
+                    try:
+                        payload = json.load(f)
+                    except json.JSONDecodeError:
+                        payload = {}
+
+            constraints = {
+                key: value
+                for key, value in {
+                    "minTrackWidth": params.get("minTrackWidth"),
+                    "minClearance": params.get("minClearance"),
+                    "minViaDiameter": params.get("minViaDiameter"),
+                    "minViaDrill": params.get("minViaDrill"),
+                }.items()
+                if value is not None
+            }
+
+            payload.setdefault("kicad_mcp", {}).setdefault("layer_constraints", {})[layer] = constraints
+            with open(project_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+
+            return {
+                "success": True,
+                "message": f"Stored layer constraints for {layer}",
+                "layer": layer,
+                "constraints": constraints,
+                "projectFile": project_file,
+            }
+        except Exception as e:
+            logger.error(f"Error setting layer constraints: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to set layer constraints",
+                "errorDetails": str(e),
+            }
+
+    def check_clearance(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Approximate clearance check using item positions and bounding boxes."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            scale = 1000000
+            min_clearance = self.board.GetDesignSettings().m_MinClearance / scale
+
+            def _resolve_point(item: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+                if item.get("position"):
+                    pos = item["position"]
+                    unit_scale = 1.0 if pos.get("unit", "mm") == "mm" else 25.4
+                    return (float(pos.get("x", 0)) * unit_scale, float(pos.get("y", 0)) * unit_scale)
+
+                if item.get("reference"):
+                    module = self.board.FindFootprintByReference(item["reference"])
+                    if module:
+                        pos = module.GetPosition()
+                        return (pos.x / scale, pos.y / scale)
+
+                return None
+
+            point1 = _resolve_point(params.get("item1", {}))
+            point2 = _resolve_point(params.get("item2", {}))
+            if not point1 or not point2:
+                return {
+                    "success": False,
+                    "message": "Unable to resolve both items",
+                    "errorDetails": "Provide either positions or component references",
+                }
+
+            dx = point1[0] - point2[0]
+            dy = point1[1] - point2[1]
+            distance = (dx * dx + dy * dy) ** 0.5
+
+            return {
+                "success": True,
+                "clearance": {
+                    "actual": distance,
+                    "required": min_clearance,
+                    "passes": distance >= min_clearance,
+                    "unit": "mm",
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error checking clearance: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to check clearance",
                 "errorDetails": str(e),
             }
