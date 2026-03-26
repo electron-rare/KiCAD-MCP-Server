@@ -4,7 +4,6 @@ Tests for platform_helper utility
 These are unit tests that work on all platforms.
 """
 import pytest
-import platform
 from pathlib import Path
 import sys
 import os

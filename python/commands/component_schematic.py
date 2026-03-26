@@ -1,5 +1,4 @@
 from skip import Schematic
-import os
 import uuid
 import logging
 from pathlib import Path

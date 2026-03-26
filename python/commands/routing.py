@@ -2,11 +2,10 @@
 Routing-related command implementations for KiCAD interface
 """
 
-import os
 import pcbnew
 import logging
 import math
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger("kicad_interface")
 
@@ -844,7 +843,7 @@ class RoutingCommands:
             offset_y = target_pos.y - source_pos.y
 
             # Build mapping from source refs to target refs
-            ref_mapping = dict(zip(source_refs, target_refs))
+            dict(zip(source_refs, target_refs))
 
             # Collect all nets connected to source components
             source_nets = set()

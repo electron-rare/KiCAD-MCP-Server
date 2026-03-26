@@ -16,7 +16,6 @@ import string
 import base64
 import json
 from typing import Optional, Dict, List, Callable
-from pathlib import Path
 
 logger = logging.getLogger('kicad_interface')
 
@@ -260,7 +259,7 @@ def test_jlcpcb_connection(app_id: Optional[str] = None, access_key: Optional[st
     try:
         client = JLCPCBClient(app_id, access_key, secret_key)
         # Test by fetching first page
-        data = client.fetch_parts_page()
+        client.fetch_parts_page()
         logger.info("JLCPCB API connection test successful")
         return True
     except Exception as e:
@@ -283,7 +282,7 @@ if __name__ == '__main__':
         print(f"✓ Retrieved {len(parts)} parts in first page")
 
         if parts:
-            print(f"\nExample part:")
+            print("\nExample part:")
             part = parts[0]
             print(f"  LCSC: {part.get('componentCode')}")
             print(f"  MFR Part: {part.get('componentModelEn')}")

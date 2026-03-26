@@ -5,7 +5,7 @@ Board view command implementations for KiCAD interface
 import os
 import pcbnew
 import logging
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional
 from PIL import Image
 import io
 import base64

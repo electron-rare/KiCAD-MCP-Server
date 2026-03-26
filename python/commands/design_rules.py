@@ -5,7 +5,7 @@ Design rules command implementations for KiCAD interface
 import os
 import pcbnew
 import logging
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, Tuple
 import json
 
 logger = logging.getLogger("kicad_interface")
@@ -185,8 +185,6 @@ class DesignRuleCommands:
         import subprocess
         import json
         import tempfile
-        import platform
-        import shutil
 
         try:
             if not self.board:

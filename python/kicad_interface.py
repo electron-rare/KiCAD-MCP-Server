@@ -152,7 +152,7 @@ if KICAD_BACKEND in ("auto", "ipc"):
         ipc_backend = IPCBackend()
         if ipc_backend.connect():
             USE_IPC_BACKEND = True
-            logger.info(f"✓ Using IPC backend - real-time UI sync enabled!")
+            logger.info("✓ Using IPC backend - real-time UI sync enabled!")
             logger.info(f"  KiCAD version: {ipc_backend.get_version()}")
         else:
             logger.info("IPC backend available but KiCAD not running with IPC enabled")

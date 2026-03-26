@@ -6,7 +6,6 @@ Auto-detects available backends and provides fallback mechanism.
 import os
 import logging
 from typing import Optional
-from pathlib import Path
 
 from kicad_api.base import KiCADBackend, APINotAvailableError
 

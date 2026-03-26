@@ -6,8 +6,7 @@ read-only access to project data for LLM context.
 """
 
 import json
-import base64
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 import logging
 
 logger = logging.getLogger('kicad_interface')

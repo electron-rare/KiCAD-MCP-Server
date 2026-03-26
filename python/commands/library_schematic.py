@@ -1,4 +1,3 @@
-from skip import Schematic
 # Symbol class might not be directly importable in the current version
 import os
 import glob
@@ -75,7 +74,7 @@ class LibraryManager:
             # 3. Filtering symbols based on the query
             
             # For now, this is a placeholder implementation
-            libraries = LibraryManager.list_available_libraries(search_paths)
+            LibraryManager.list_available_libraries(search_paths)
             
             results = []
             print(f"Searched for symbols matching '{query}'. This requires advanced implementation.")

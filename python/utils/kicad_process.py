@@ -3,7 +3,6 @@ KiCAD Process Management Utilities
 
 Detects if KiCAD is running and provides auto-launch functionality.
 """
-import os
 import subprocess
 import logging
 import platform

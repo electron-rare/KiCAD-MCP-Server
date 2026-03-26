@@ -8,10 +8,9 @@ manipulate the .kicad_sch file directly.
 
 import uuid
 import logging
-import math
 import tempfile
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List
 import sexpdata
 from sexpdata import Symbol
 
@@ -423,7 +422,7 @@ if __name__ == '__main__':
         from skip import Schematic
         sch = Schematic(str(test_path))
         wire_count = len(list(sch.wire)) if hasattr(sch, 'wire') else 0
-        print(f"  ✓ Loaded successfully")
+        print("  ✓ Loaded successfully")
         print(f"  ✓ Wire count: {wire_count}")
     except Exception as e:
         print(f"  ✗ Failed: {e}")

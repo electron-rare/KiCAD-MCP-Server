@@ -82,9 +82,9 @@ class PlatformHelper:
             # Check system Python dist-packages (modern KiCAD 9+ on Ubuntu/Debian)
             # This is where pcbnew.py typically lives on modern systems
             candidates.extend([
-                Path(f"/usr/lib/python3/dist-packages"),
+                Path("/usr/lib/python3/dist-packages"),
                 Path(f"/usr/lib/python{py_version}/dist-packages"),
-                Path(f"/usr/local/lib/python3/dist-packages"),
+                Path("/usr/local/lib/python3/dist-packages"),
                 Path(f"/usr/local/lib/python{py_version}/dist-packages"),
             ])
 

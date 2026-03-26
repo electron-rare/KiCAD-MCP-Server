@@ -501,7 +501,7 @@ if __name__ == '__main__':
 
     # Get stats
     stats = manager.get_database_stats()
-    print(f"\nDatabase Statistics:")
+    print("\nDatabase Statistics:")
     print(f"  Total parts: {stats['total_parts']}")
     print(f"  Basic parts: {stats['basic_parts']}")
     print(f"  Extended parts: {stats['extended_parts']}")

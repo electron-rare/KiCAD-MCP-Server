@@ -10,7 +10,6 @@ import re
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-import glob
 
 logger = logging.getLogger("kicad_interface")
 

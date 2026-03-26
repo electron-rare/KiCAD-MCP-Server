@@ -2,7 +2,6 @@
 Component-related command implementations for KiCAD interface
 """
 
-import os
 import pcbnew
 import logging
 import math
@@ -1519,11 +1518,11 @@ class ComponentCommands:
         # Convert spacing to nm
         unit = start_position.get("unit", "mm")
         scale = 1000000 if unit == "mm" else 25400000  # mm or inch to nm
-        spacing_x_nm = int(spacing_x * scale)
-        spacing_y_nm = int(spacing_y * scale)
+        int(spacing_x * scale)
+        int(spacing_y * scale)
         
         # Get layer ID
-        layer_id = self.board.GetLayerID(layer)
+        self.board.GetLayerID(layer)
         
         for row in range(rows):
             for col in range(columns):

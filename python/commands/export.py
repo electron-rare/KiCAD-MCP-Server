@@ -5,8 +5,7 @@ Export command implementations for KiCAD interface
 import os
 import pcbnew
 import logging
-from typing import Dict, Any, Optional, List, Tuple
-import base64
+from typing import Dict, Any, Optional, List
 import subprocess
 
 logger = logging.getLogger("kicad_interface")
@@ -322,8 +321,6 @@ class ExportCommands:
     def export_3d(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Export 3D model files using kicad-cli (KiCAD 9.0 compatible)"""
         import subprocess
-        import platform
-        import shutil
 
         try:
             if not self.board:
